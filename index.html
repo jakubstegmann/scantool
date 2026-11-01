@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Premenovanie faktúr</title>
+<style>
+  :root { --bg:#f5f5f7; --card:#fff; --line:#d8d8de; --accent:#0a64d6; --orange:#ffe2b8; --muted:#6b6b76; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:#1d1d1f; }
+  main { max-width:1200px; margin:0 auto; padding:18px; display:flex; flex-direction:column; gap:12px; height:100vh; }
+  h1 { font-size:20px; margin:0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .row label.t { width:150px; font-weight:600; }
+  .path { flex:1; min-width:200px; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:#fafafa; color:#333; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .path.empty { color:var(--muted); }
+  button { font:inherit; padding:6px 14px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; }
+  button:hover:not(:disabled) { background:#f0f0f4; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.primary:hover:not(:disabled) { background:#0853b3; }
+  button:disabled { opacity:.45; cursor:default; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .seg label { padding:5px 12px; cursor:pointer; background:#fff; }
+  .seg input { display:none; }
+  .seg input:checked + span { font-weight:600; color:var(--accent); }
+  .seg.disabled { opacity:.45; pointer-events:none; }
+  .hint { color:var(--muted); font-size:13px; }
+  progress { width:260px; }
+  .tablewrap { flex:1; overflow:auto; background:var(--card); border:1px solid var(--line); border-radius:8px; min-height:200px; position:relative; }
+  table { border-collapse:collapse; width:100%; }
+  th { position:sticky; top:0; background:#ececf1; text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); z-index:1; }
+  td { padding:3px 8px; border-bottom:1px solid #ececf0; vertical-align:middle; }
+  tr.missing td { background:var(--orange); }
+  td input[type=text] { width:100%; padding:4px 6px; border:1px solid transparent; border-radius:4px; background:transparent; font:inherit; }
+  td input[type=text]:hover, td input[type=text]:focus { border-color:var(--line); background:#fff; }
+  td.name { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  td.status { white-space:nowrap; color:var(--muted); }
+  td.status.err { color:#c0211f; white-space:normal; }
+  .empty-msg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--muted); padding:20px; pointer-events:none; }
+  .linkbtn { border:none; background:none; color:var(--accent); padding:0 0 0 8px; text-decoration:underline; }
+  dialog { border:1px solid var(--line); border-radius:10px; padding:16px; max-width:90vw; }
+  dialog::backdrop { background:rgba(0,0,0,.35); }
+  dialog pre { white-space:pre-wrap; max-height:55vh; overflow:auto; background:#fafafa; border:1px solid var(--line); border-radius:6px; padding:8px; margin:10px 0; }
+  dialog .actions { display:flex; justify-content:flex-end; gap:8px; }
+  #previewDlg { width:900px; height:90vh; }
+  #previewDlg iframe { width:100%; height:calc(100% - 90px); border:1px solid var(--line); margin:10px 0; }
+  #unsupported { background:#ffe3e3; border:1px solid #e99; padding:10px 12px; border-radius:8px; display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Premenovanie naskenovaných faktúr</h1>
+
+  <div id="unsupported">Tento prehliadač nepodporuje výber priečinkov. Otvorte stránku v <b>Google Chrome</b> alebo <b>Microsoft Edge</b>.</div>
+
+  <div class="card">
+    <div class="row">
+      <label class="t">Vstupný priečinok:</label>
+      <div class="path empty" id="inPath">nevybraný</div>
+      <button id="pickIn">Vybrať…</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label class="t">Výstupný priečinok:</label>
+      <div class="path empty" id="outPath">nevybraný</div>
+      <button id="pickOut">Vybrať…</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <strong>Názov súboru:</strong>
+      <label><input type="checkbox" id="useNumber"> Číslo faktúry</label>
+      <label><input type="checkbox" id="useSupplier"> Dodávateľ</label>
+      <span class="seg" id="orderSeg">
+        <label><input type="radio" name="order" value="supplier"><span>Dodávateľ najprv</span></label>
+        <label><input type="radio" name="order" value="number"><span>Číslo najprv</span></label>
+      </span>
+      <span class="hint" id="formatHint"></span>
+    </div>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="analyze">Načítať a analyzovať</button>
+    <progress id="bar" value="0" max="1" hidden></progress>
+    <span id="progText" hidden></span>
+    <button id="cancel" hidden>Zrušiť</button>
+    <span class="hint" id="busyText"></span>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th style="width:34px"></th>
+        <th>Pôvodný názov</th>
+        <th>Nájdené číslo faktúry</th>
+        <th>Nájdený dodávateľ</th>
+        <th>Nový názov</th>
+        <th>Stav</th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="empty-msg" id="emptyMsg">Vyberte priečinky a kliknite na „Načítať a analyzovať“.<br>Dvojklik na riadok otvorí PDF na kontrolu.</div>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="rename">Premenovať</button>
+    <span class="hint" id="countText"></span>
+    <span style="flex:1"></span>
+    <button id="learnedBtn" title="Čo sa program naučil z vašich opráv">Naučené</button>
+    <button id="learnedClear" title="Zabudnúť všetko naučené">Zabudnúť naučené</button>
+  </div>
+</main>
+
+<dialog id="reportDlg">
+  <h3 id="reportTitle" style="margin:0"></h3>
+  <pre id="reportText"></pre>
+  <div class="actions"><button class="primary" id="reportClose">Zavrieť</button></div>
+</dialog>
+
+<dialog id="previewDlg">
+  <strong id="previewTitle"></strong>
+  <iframe id="previewFrame"></iframe>
+  <div class="actions"><button class="primary" id="previewClose">Zavrieť</button></div>
+</dialog>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="parser.js"></script>
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- pomocné
+const $ = s => document.querySelector(s);
+const state = { inDir: null, outDir: null, items: [], busy: false, cancel: false, nextId: 1, previewUrl: null };
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { localStorage.setItem(k, JSON.stringify(v)); },
+};
+const opts = {
+  useNumber: store.get("useNumber", true),
+  useSupplier: store.get("useSupplier", true),
+  supplierFirst: store.get("supplierFirst", true),
+};
+
+// Naučené z opráv (pozri parser.js → learnFromCorrection); uložené v prehliadači.
+let learned = normalizeLearned(store.get("learned", null));
+
+// Posledné priečinky (handle sa dá uložiť do IndexedDB)
+const idb = {
+  open() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open("premenovanie-faktur", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("kv");
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async get(k) { const db = await this.open(); return new Promise(res => { const q = db.transaction("kv").objectStore("kv").get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); }); },
+  async set(k, v) { const db = await this.open(); return new Promise(res => { const t = db.transaction("kv", "readwrite"); t.objectStore("kv").put(v, k); t.oncomplete = () => res(); t.onerror = () => res(); }); },
+};
+
+async function ensurePermission(handle, mode) {
+  const o = { mode };
+  if ((await handle.queryPermission(o)) === "granted") return true;
+  return (await handle.requestPermission(o)) === "granted";
+}
+
+// ---------------------------------------------------------------- názvy súborov
+function sanitize(text) {
+  let r = Array.from(text).map(ch =>
+    /[\/:\\?*"<>|]/.test(ch) || /[\u0000-\u001f\u007f]/.test(ch) ? "-" :
+    /[\s,]/u.test(ch) ? "_" : ch).join("");   // medzera a čiarka → podčiarkovník
+  r = r.replace(/_{2,}/g, "_").replace(/-{2,}/g, "-").replace(/^[_\-. ]+|[_\-. ]+$/g, "");
+  if (Array.from(r).length > 60) r = Array.from(r).slice(0, 60).join("").replace(/[_\-. ]+$/, "");
+  return r;
+}
+
+/** Nový názov bez prípony, alebo null, ak chýba potrebný údaj. */
+function newBaseName(it) {
+  const num = sanitize(it.number), sup = sanitize(it.supplier);
+  if (opts.useNumber && opts.useSupplier) {
+    if (!num || !sup) return null;
+    return opts.supplierFirst ? `${sup}_${num}` : `${num}_${sup}`;
+  }
+  if (opts.useNumber) return num || null;
+  if (opts.useSupplier) return sup || null;
+  return null;
+}
+
+const isMissing = it =>
+  (opts.useNumber && !it.number.trim()) || (opts.useSupplier && !it.supplier.trim());
+
+async function entryExists(dir, name) {
+  try { await dir.getFileHandle(name); return true; }
+  catch (e) {
+    if (e.name === "NotFoundError") return false;
+    if (e.name === "TypeMismatchError") return true;
+    throw e;
+  }
+}
+
+/** Názov, ktorý ešte vo výstupnom priečinku neexistuje: Názov.pdf, Názov_2.pdf, … (nikdy neprepíše). */
+async function uniqueName(dir, base) {
+  let name = `${base}.pdf`, n = 1;
+  while (await entryExists(dir, name)) { n++; name = `${base}_${n}.pdf`; }
+  return name;
+}
+
+// ---------------------------------------------------------------- získanie textu z PDF
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+const MAX_PAGES = 2;               // koľko prvých strán sa spracuje
+const MIN_TEXT_LAYER_CHARS = 40;   // od koľkých znakov sa textová vrstva považuje za použiteľnú
+const OCR_LANGS = "slk+ces+hun+eng";
+
+/** Úlomky textu s polohou → riadky; stĺpce v riadku sú oddelené tabulátorom. */
+function layoutFragments(frags, gapFactor) {
+  const sorted = frags.slice().sort((a, b) => a.y - b.y);
+  const rows = [];
+  let cur = null;
+  for (const f of sorted) {
+    if (cur && Math.abs(f.y - cur.y) < 0.6 * Math.max(f.h, cur.h)) cur.items.push(f);
+    else { cur = { y: f.y, h: f.h, items: [f] }; rows.push(cur); }
+  }
+  return rows.map(r => {
+    r.items.sort((a, b) => a.x0 - b.x0);
+    let out = r.items[0].t;
+    for (let i = 1; i < r.items.length; i++) {
+      const gap = r.items[i].x0 - r.items[i - 1].x1;
+      const h = Math.max(r.h, r.items[i].h);
+      out += (gap > gapFactor * h ? "\t" : " ") + r.items[i].t;
+    }
+    return out;
+  }).join("\n");
+}
+
+async function pageText(pdf, index, ocr) {
+  const page = await pdf.getPage(index);
+
+  // 1) textová vrstva – OCR netreba
+  const content = await page.getTextContent();
+  const frags = content.items.filter(i => i.str && i.str.trim()).map(i => ({
+    t: i.str, x0: i.transform[4], x1: i.transform[4] + i.width,
+    y: -i.transform[5], h: Math.abs(i.transform[3]) || i.height || 10,
+  }));
+  const useful = frags.reduce((n, f) => n + Array.from(f.t).filter(c => /[\p{L}\p{N}]/u.test(c)).length, 0);
+  if (useful >= MIN_TEXT_LAYER_CHARS) return layoutFragments(frags, 1.0);
+
+  // 2) OCR (Tesseract, beží lokálne v prehliadači)
+  const base = page.getViewport({ scale: 1 });
+  const scale = 3000 / Math.max(base.width, base.height);
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  const { data } = await ocr.recognize(canvas);
+  canvas.width = canvas.height = 0;
+  const words = (data.words || []).filter(w => w.text && w.text.trim()).map(w => ({
+    t: w.text.trim(), x0: w.bbox.x0, x1: w.bbox.x1,
+    y: (w.bbox.y0 + w.bbox.y1) / 2, h: w.bbox.y1 - w.bbox.y0,
+  }));
+  return words.length ? layoutFragments(words, 1.5) : "";
+}
+
+async function analyzeFile(file, ocr) {
+  const data = new Uint8Array(await file.arrayBuffer());
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
+  try {
+    let text = await pageText(pdf, 1, ocr);
+    let parsed = parseInvoice(text, learned);
+    if ((!parsed.number || !parsed.supplier) && pdf.numPages > 1 && MAX_PAGES > 1) {
+      text += "\n" + await pageText(pdf, 2, ocr);
+      parsed = parseInvoice(text, learned);
+    }
+    return { number: parsed.number, supplier: parsed.supplier, raw: text };
+  } finally {
+    pdf.destroy();
+  }
+}
+
+// ---------------------------------------------------------------- tabuľka
+function rowEl(it) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input type="checkbox" class="inc"></td>
+    <td class="name"></td>
+    <td><input type="text" class="num" placeholder="— nenájdené —"></td>
+    <td><input type="text" class="sup" placeholder="— nenájdený —"></td>
+    <td class="name newname"></td>
+    <td class="status"><span class="st"></span><button class="linkbtn rawbtn" title="Zobraziť, čo OCR prečítalo">text</button><button class="linkbtn prevbtn" title="Zobraziť PDF na kontrolu">náhľad</button></td>`;
+  tr.querySelector(".name").textContent = it.file.name;
+  tr.querySelector(".name").title = it.file.name;
+  const num = tr.querySelector(".num"), sup = tr.querySelector(".sup"), inc = tr.querySelector(".inc");
+  num.value = it.number; sup.value = it.supplier;
+  inc.addEventListener("change", () => { it.include = inc.checked && newBaseName(it) !== null; refreshRow(it, tr); updateButtons(); });
+  num.addEventListener("input", () => { it.number = num.value; it.editedNum = true; it.include = newBaseName(it) !== null; refreshRow(it, tr); updateButtons(); });
+  sup.addEventListener("input", () => { it.supplier = sup.value; it.editedSup = true; it.include = newBaseName(it) !== null; refreshRow(it, tr); updateButtons(); });
+  tr.querySelector(".rawbtn").addEventListener("click", e => { e.stopPropagation(); showReport("Rozpoznaný text – " + it.file.name, (it.raw || "(nič sa nerozpoznalo)").replace(/\t/g, "   |   ")); });
+  tr.querySelector(".prevbtn").addEventListener("click", e => { e.stopPropagation(); showPreview(it); });
+  tr.addEventListener("dblclick", e => { if (e.target.tagName !== "INPUT") showPreview(it); });
+  it.tr = tr;
+  refreshRow(it, tr);
+  return tr;
+}
+
+function refreshRow(it, tr) {
+  const base = newBaseName(it);
+  const inc = tr.querySelector(".inc");
+  inc.checked = it.include && base !== null;
+  inc.disabled = base === null;
+  tr.classList.toggle("missing", isMissing(it));
+  tr.querySelector(".newname").textContent = base ? base + ".pdf" : "—";
+  const st = tr.querySelector(".st");
+  st.textContent = it.error ? "Chyba: " + it.error : it.copiedName ? "Skopírované" : "";
+  tr.querySelector(".status").classList.toggle("err", !!it.error);
+}
+
+function refreshAllRows() {
+  for (const it of state.items) {
+    if (!it.copiedName) it.include = newBaseName(it) !== null;
+    refreshRow(it, it.tr);
+  }
+  updateButtons();
+}
+
+function renderTable() {
+  const tbody = $("#tbody");
+  tbody.replaceChildren(...state.items.map(rowEl));
+  updateButtons();
+}
+
+function selectedItems() { return state.items.filter(it => it.include && newBaseName(it) !== null); }
+
+function updateButtons() {
+  const anyOpt = opts.useNumber || opts.useSupplier;
+  const supported = !!window.showDirectoryPicker;
+  $("#analyze").disabled = state.busy || !state.inDir || !supported;
+  $("#rename").disabled = state.busy || !anyOpt || !state.outDir || selectedItems().length === 0;
+  $("#pickIn").disabled = $("#pickOut").disabled = state.busy || !supported;
+  $("#emptyMsg").style.display = state.items.length || state.busy ? "none" : "flex";
+  $("#countText").textContent = state.items.length ? `Na premenovanie: ${selectedItems().length} z ${state.items.length}` : "";
+  const fmt = opts.useNumber && opts.useSupplier
+    ? (opts.supplierFirst ? "Dodávateľ_ČísloFaktúry.pdf" : "ČísloFaktúry_Dodávateľ.pdf")
+    : opts.useNumber ? "ČísloFaktúry.pdf" : opts.useSupplier ? "Dodávateľ.pdf" : "Zaškrtnite aspoň jednu voľbu.";
+  $("#formatHint").textContent = "Formát: " + fmt;
+  $("#orderSeg").classList.toggle("disabled", !(opts.useNumber && opts.useSupplier));
+}
+
+// ---------------------------------------------------------------- okná
+function showReport(title, text) {
+  $("#reportTitle").textContent = title;
+  $("#reportText").textContent = text;
+  $("#reportDlg").showModal();
+}
+$("#reportClose").onclick = () => $("#reportDlg").close();
+
+async function showPreview(it) {
+  try {
+    const file = await it.handle.getFile();
+    if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+    state.previewUrl = URL.createObjectURL(file);
+    $("#previewTitle").textContent = it.file.name;
+    $("#previewFrame").src = state.previewUrl;
+    $("#previewDlg").showModal();
+  } catch (e) { showReport("Chyba", "PDF sa nepodarilo otvoriť: " + e.message); }
+}
+$("#previewClose").onclick = () => { $("#previewDlg").close(); $("#previewFrame").src = "about:blank"; };
+
+// ---------------------------------------------------------------- výber priečinkov
+function showFolder(el, handle, hint) {
+  el.textContent = handle ? handle.name + (hint || "") : "nevybraný";
+  el.classList.toggle("empty", !handle);
+}
+
+$("#pickIn").onclick = async () => {
+  try {
+    const h = await window.showDirectoryPicker({ id: "vstup", mode: "read" });
+    state.inDir = h; await idb.set("in", h); showFolder($("#inPath"), h);
+    updateButtons();
+  } catch (e) { if (e.name !== "AbortError") showReport("Chyba", e.message); }
+};
+$("#pickOut").onclick = async () => {
+  try {
+    const h = await window.showDirectoryPicker({ id: "vystup", mode: "readwrite" });
+    state.outDir = h; await idb.set("out", h); showFolder($("#outPath"), h);
+    updateButtons();
+  } catch (e) { if (e.name !== "AbortError") showReport("Chyba", e.message); }
+};
+
+// ---------------------------------------------------------------- analýza
+function setProgress(done, total) {
+  $("#bar").max = Math.max(total, 1); $("#bar").value = done;
+  $("#progText").textContent = `${done} / ${total}`;
+}
+function setBusy(b, text) {
+  state.busy = b;
+  for (const sel of ["#bar", "#progText", "#cancel"]) $(sel).hidden = !(b && text === "analyze");
+  $("#busyText").textContent = b && text !== "analyze" ? text : "";
+  updateButtons();
+}
+
+$("#analyze").onclick = async () => {
+  if (state.busy || !state.inDir) return;
+  if (!(await ensurePermission(state.inDir, "read"))) { showReport("Chyba", "Bez prístupu k vstupnému priečinku sa nedá pokračovať."); return; }
+
+  const files = [];
+  for await (const [name, h] of state.inDir.entries()) {
+    if (h.kind === "file" && /\.pdf$/i.test(name) && !name.startsWith(".")) files.push(h);
+  }
+  files.sort((a, b) => a.name.localeCompare(b.name, "sk", { numeric: true }));
+  if (!files.length) { showReport("Žiadne PDF", "Vo vstupnom priečinku sa nenašli žiadne súbory PDF."); return; }
+
+  state.items = []; renderTable();
+  state.cancel = false;
+  setProgress(0, files.length);
+  setBusy(true, "analyze");
+
+  let ocr = null;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      if (state.cancel) break;
+      const handle = files[i];
+      const file = await handle.getFile();
+      const it = { id: state.nextId++, handle, file, include: false, number: "", supplier: "", raw: "", copiedName: null, error: null,
+                   autoNumber: "", autoSupplier: "", editedNum: false, editedSup: false };
+      try {
+        if (!ocr) {
+          // Tesseract sa spustí až keď je potrebný (stiahne jazykové dáta, vďaka cache len raz)
+          ocr = { worker: null, async recognize(c) {
+            if (!this.worker) {
+              $("#busyText").textContent = "Pripravujem OCR (prvýkrát sa sťahujú jazykové dáta)…";
+              $("#busyText").hidden = false;
+              this.worker = await Tesseract.createWorker(OCR_LANGS, 1, {});
+              await this.worker.setParameters({ preserve_interword_spaces: "1" });
+              $("#busyText").textContent = "";
+            }
+            return this.worker.recognize(c);
+          } };
+        }
+        const r = await analyzeFile(file, ocr);
+        it.number = r.number; it.supplier = r.supplier; it.raw = r.raw;
+        it.autoNumber = r.number; it.autoSupplier = r.supplier;
+      } catch (e) {
+        it.error = "nepodarilo sa prečítať (" + (e.message || e) + ")";
+      }
+      it.include = newBaseName(it) !== null;
+      state.items.push(it);
+      $("#tbody").appendChild(rowEl(it));
+      setProgress(i + 1, files.length);
+      updateButtons();
+    }
+  } finally {
+    if (ocr && ocr.worker) await ocr.worker.terminate();
+    setBusy(false);
+  }
+};
+$("#cancel").onclick = () => { state.cancel = true; };
+
+// ---------------------------------------------------------------- premenovanie (kopírovanie)
+$("#rename").onclick = async () => {
+  const jobs = selectedItems();
+  if (!jobs.length || !state.outDir) return;
+  if (!(await ensurePermission(state.outDir, "readwrite"))) { showReport("Chyba", "Bez prístupu na zápis do výstupného priečinka sa nedá pokračovať."); return; }
+
+  setBusy(true, "Kopírujem súbory…");
+  let ok = 0; const failures = [];
+  try {
+    for (const it of jobs) {
+      try {
+        const name = await uniqueName(state.outDir, newBaseName(it));
+        const src = await it.handle.getFile();
+        const fh = await state.outDir.getFileHandle(name, { create: true });
+        const w = await fh.createWritable();
+        await w.write(src);
+        await w.close();
+        if ((await fh.getFile()).size !== src.size) throw new Error("veľkosť kópie nesedí s originálom");
+        it.copiedName = name; it.error = null; it.include = false;
+        ok++;
+        learnFrom(it);
+      } catch (e) {
+        it.error = e.message || String(e);
+        failures.push(`• ${it.file.name}: ${it.error}`);
+      }
+      refreshRow(it, it.tr);
+    }
+  } finally {
+    setBusy(false);
+  }
+  const lr = finishLearning();
+  let text = `Úspešne skopírované: ${ok}\nZlyhalo: ${failures.length}\n\nVýstupný priečinok: ${state.outDir.name}`;
+  if (failures.length) text += "\n\nChyby:\n" + failures.join("\n");
+  if (ok) text += "\n\nPôvodné súbory zostali nedotknuté.";
+  if (lr.total) {
+    text += `\n\nNaučené z vašich opráv: ${lr.parts.join(", ")}.`;
+    if (lr.refreshed) text += `\nPodľa toho sa doplnilo/opravilo ${lr.refreshed} ďalších riadkov v tabuľke.`;
+  }
+  showReport("Súhrn premenovania", text);
+};
+
+// ---------------------------------------------------------------- učenie z opráv
+/** Opravy čakajúce na uloženie (spracujú sa naraz po dokončení premenovania). */
+const learnQueue = [];
+
+/** Zapamätá si opravy z jedného úspešne skopírovaného riadku. */
+function learnFrom(it) {
+  if (!it.raw) return;
+  learnQueue.push({
+    raw: it.raw,
+    final: { number: it.number, supplier: it.supplier },
+    auto: { number: it.autoNumber, supplier: it.autoSupplier },
+  });
+  it.autoNumber = it.number.trim(); it.autoSupplier = it.supplier.trim();   // aby sa to neučilo dvakrát
+}
+
+/** Naučí sa zo všetkých čakajúcich opráv do `l`; vráti počty nových vecí. */
+function applyLearnQueue(l) {
+  const run = { supplier: 0, alias: 0, label: 0, shape: 0 };
+  for (const q of learnQueue) {
+    try {
+      const r = learnFromCorrection(l, q.raw, q.final, q.auto);
+      for (const k of Object.keys(run)) if (r[k]) run[k]++;
+    } catch (e) { console.warn("Učenie zlyhalo", e); }   // učenie nikdy nesmie rozbiť kopírovanie
+  }
+  return run;
+}
+
+/** Uloží naučené a znova vyhodnotí riadky, ktoré ešte neboli skopírované a ktoré používateľ ručne nemenil. */
+function finishLearning() {
+  let run = { supplier: 0, alias: 0, label: 0, shape: 0 };
+  if (learnQueue.length) {
+    run = applyLearnQueue(learned);
+    store.set("learned", learned);
+    learnQueue.length = 0;
+  }
+  const total = run.supplier + run.alias + run.label + run.shape;
+  const parts = [];
+  if (run.supplier) parts.push(`${run.supplier}× dodávateľ`);
+  if (run.alias) parts.push(`${run.alias}× oprava názvu`);
+  if (run.label) parts.push(`${run.label}× označenie čísla faktúry`);
+  if (run.shape) parts.push(`${run.shape}× tvar čísla`);
+  let refreshed = 0;
+  if (total) {
+    for (const it of state.items) {
+      if (it.copiedName || !it.raw) continue;
+      const p = parseInvoice(it.raw, learned);
+      let changed = false;
+      if (!it.editedNum && p.number !== it.number) { it.number = p.number; it.autoNumber = p.number; changed = true; }
+      if (!it.editedSup && p.supplier !== it.supplier) { it.supplier = p.supplier; it.autoSupplier = p.supplier; changed = true; }
+      if (!changed) continue;
+      it.tr.querySelector(".num").value = it.number;
+      it.tr.querySelector(".sup").value = it.supplier;
+      it.include = newBaseName(it) !== null;
+      refreshRow(it, it.tr);
+      refreshed++;
+    }
+    updateButtons();
+  }
+  updateLearnedUi();
+  return { total, parts, refreshed };
+}
+
+function updateLearnedUi() {
+  const s = learnedStats(learned);
+  const n = s.suppliers + s.aliases + s.labels + s.shapes;
+  $("#learnedBtn").textContent = n ? `Naučené (${n})` : "Naučené";
+  $("#learnedClear").disabled = n === 0;
+}
+
+$("#learnedBtn").onclick = () => {
+  const s = learnedStats(learned);
+  const lines = [
+    "Program sa učí z vašich opráv: keď v tabuľke niečo prepíšete a potvrdíte to tlačidlom „Premenovať“,",
+    "zapamätá si to a nabudúce to nájde sám. Údaje sú uložené len v tomto prehliadači.",
+    "",
+    `Zapamätaní dodávatelia (${s.suppliers}) – nájdu sa podľa názvu v texte faktúry:`,
+    ...learned.suppliers.map(x => "  • " + x),
+    "",
+    `Opravy názvov (${s.aliases}) – rozpoznaný názov → váš názov:`,
+    ...Object.entries(learned.aliases).map(([k, v]) => `  • ${k}  →  ${v}`),
+    "",
+    `Označenia čísla faktúry (${s.labels}):`,
+    ...Object.entries(learned.numberLabels).flatMap(([k, a]) => a.map(l => `  • ${k}: „${l}“`)),
+    ...learned.globalLabels.map(l => `  • pre všetkých dodávateľov: „${l}“`),
+    "",
+    `Tvary čísel faktúr (${s.shapes}) – A = písmeno, 9 = číslica; slúžia na opravu OCR chýb (O↔0, l↔1…):`,
+    ...Object.entries(learned.numberShapes).flatMap(([k, a]) => a.map(sh => `  • ${k}: ${sh}`)),
+  ];
+  showReport("Naučené z opráv", lines.join("\n"));
+};
+$("#learnedClear").onclick = () => {
+  if (!confirm("Naozaj zabudnúť všetko, čo sa program naučil z vašich opráv?")) return;
+  learned = emptyLearned();
+  store.set("learned", learned);
+  updateLearnedUi();
+};
+
+// ---------------------------------------------------------------- voľby
+function initOptions() {
+  $("#useNumber").checked = opts.useNumber;
+  $("#useSupplier").checked = opts.useSupplier;
+  document.querySelector(`input[name=order][value=${opts.supplierFirst ? "supplier" : "number"}]`).checked = true;
+  $("#useNumber").onchange = e => { opts.useNumber = e.target.checked; store.set("useNumber", opts.useNumber); refreshAllRows(); };
+  $("#useSupplier").onchange = e => { opts.useSupplier = e.target.checked; store.set("useSupplier", opts.useSupplier); refreshAllRows(); };
+  document.querySelectorAll("input[name=order]").forEach(r => r.onchange = e => {
+    opts.supplierFirst = e.target.value === "supplier"; store.set("supplierFirst", opts.supplierFirst); refreshAllRows();
+  });
+}
+
+(async function init() {
+  if (!window.showDirectoryPicker) $("#unsupported").style.display = "block";
+  initOptions();
+
+  try {
+    const i = await idb.get("in"), o = await idb.get("out");
+    if (i) { state.inDir = i; showFolder($("#inPath"), i, "  (naposledy zvolený)"); }
+    if (o) { state.outDir = o; showFolder($("#outPath"), o, "  (naposledy zvolený)"); }
+  } catch {}
+  updateButtons();
+  updateLearnedUi();
+})();
+</script>
+</body>
+</html>
