@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Správa – Premenovanie faktúr</title>
+<style>
+  :root { --bg:#f5f5f7; --card:#fff; --line:#d8d8de; --accent:#0a64d6; --muted:#6b6b76; --red:#c0211f; --orange:#ffe2b8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:#1d1d1f; }
+  main { max-width:980px; margin:0 auto; padding:18px; display:flex; flex-direction:column; gap:14px; }
+  h1 { font-size:20px; margin:0; }
+  h2 { font-size:16px; margin:0 0 6px; }
+  h3 { font-size:14px; margin:14px 0 4px; }
+  .top { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .top .sp { flex:1; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  button { font:inherit; padding:5px 12px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; }
+  button:hover:not(:disabled) { background:#f0f0f4; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.primary:hover:not(:disabled) { background:#0853b3; }
+  button.danger { color:var(--red); }
+  button:disabled { opacity:.45; cursor:default; }
+  button.x { padding:0 7px; line-height:20px; color:var(--red); }
+  a { color:var(--accent); }
+  table { border-collapse:collapse; width:100%; margin-top:6px; }
+  th { text-align:left; padding:6px 8px; background:#ececf1; border-bottom:1px solid var(--line); }
+  td { padding:6px 8px; border-bottom:1px solid #ececf0; vertical-align:middle; }
+  td.act { display:flex; gap:6px; flex-wrap:wrap; }
+  tr.pending td { background:var(--orange); }
+  .hint { color:var(--muted); font-size:13px; }
+  .msg { margin-top:8px; padding:8px 10px; border-radius:6px; display:none; background:#ffe3e3; border:1px solid #e99; }
+  .msg.on { display:block; }
+  ul.ent { list-style:none; margin:0; padding:0; }
+  ul.ent li { display:flex; align-items:center; gap:8px; padding:2px 0; border-bottom:1px solid #f0f0f3; }
+  ul.ent li span { flex:1; word-break:break-word; }
+  .empty { color:var(--muted); font-style:italic; }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <h1>Správa</h1>
+    <a href="index.html">← Späť do aplikácie</a>
+    <span class="sp"></span>
+    <span class="hint" id="who"></span>
+    <button id="logout">Odhlásiť</button>
+  </div>
+
+  <div class="card" id="noCloud" hidden>
+    <b>Firebase nie je nastavený.</b> Doplňte hodnoty do <code>firebase-config.js</code> (postup je v README.md,
+    časť „Nasadenie a správa používateľov“).
+  </div>
+
+  <div id="content" hidden>
+    <div class="card">
+      <h2>Používatelia</h2>
+      <div class="hint">Noví používatelia sa zaregistrujú prihlásením cez Google/Apple a čakajú na vaše schválenie.</div>
+      <div class="msg" id="usrMsg"></div>
+      <div id="users"></div>
+    </div>
+
+    <div class="card">
+      <h2>Naučené údaje (spoločné pre všetkých)</h2>
+      <div class="hint">Vznikajú z opráv, ktoré používatelia potvrdia tlačidlom „Premenovať“. Zlý záznam tu môžete odstrániť.</div>
+      <div class="msg" id="lrMsg"></div>
+      <div id="learned"></div>
+      <div class="row" style="margin-top:12px"><button class="danger" id="lrClear">Zmazať všetky naučené údaje</button></div>
+    </div>
+  </div>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
+<script src="parser.js"></script>
+<script src="cloud.js"></script>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+let me = null;
+
+function showErr(el, text) { el.textContent = text; el.classList.add("on"); }
+function hideErr(el) { el.textContent = ""; el.classList.remove("on"); }
+
+// ---------------------------------------------------------------- používatelia
+const fmtDate = t => t && t.toDate ? t.toDate().toLocaleDateString("sk-SK") : "";
+const PROVIDERS = { "google.com": "Google", "apple.com": "Apple" };
+
+function usersTable(title, hint, users, actions) {
+  const box = document.createElement("div");
+  const h = document.createElement("h3"); h.textContent = `${title} (${users.length})`; box.appendChild(h);
+  if (hint) { const p = document.createElement("div"); p.className = "hint"; p.textContent = hint; box.appendChild(p); }
+  if (!users.length) { const p = document.createElement("div"); p.className = "empty"; p.textContent = "nikto"; box.appendChild(p); return box; }
+  const t = document.createElement("table");
+  t.innerHTML = "<thead><tr><th>E-mail</th><th>Meno</th><th>Cez</th><th>Rola</th><th>Dátum</th><th></th></tr></thead>";
+  const tb = t.createTBody();
+  for (const u of users) {
+    const self = u.uid === me.user.uid;
+    const tr = tb.insertRow();
+    if (u.status === "pending") tr.className = "pending";
+    tr.insertCell().textContent = (u.email || "(bez e-mailu)") + (self ? "  (vy)" : "");
+    tr.insertCell().textContent = u.name || "";
+    tr.insertCell().textContent = PROVIDERS[u.provider] || u.provider || "";
+    tr.insertCell().textContent = u.role === "admin" ? "Správca" : "Používateľ";
+    tr.insertCell().textContent = fmtDate(u.createdAt);
+    const act = tr.insertCell(); act.className = "act";
+    for (const a of actions(u, self)) {
+      const b = document.createElement("button");
+      b.textContent = a.label; if (a.cls) b.className = a.cls; b.disabled = !!a.disabled;
+      b.onclick = async () => {
+        if (a.confirm && !confirm(a.confirm)) return;
+        b.disabled = true; hideErr($("#usrMsg"));
+        try { await a.run(); } catch (e) { showErr($("#usrMsg"), Cloud.errText(e)); }
+        await renderUsers();
+      };
+      act.appendChild(b);
+    }
+  }
+  box.appendChild(t);
+  return box;
+}
+
+async function renderUsers() {
+  const host = $("#users");
+  let all;
+  try { all = await Cloud.listUsers(); }
+  catch (e) { host.textContent = "Chyba: " + Cloud.errText(e); return; }
+  const byEmail = (a, b) => (a.email || "").localeCompare(b.email || "");
+  const pending = all.filter(u => u.status === "pending").sort(byEmail);
+  const active = all.filter(u => u.status === "active").sort(byEmail);
+  const blocked = all.filter(u => u.status !== "pending" && u.status !== "active").sort(byEmail);
+
+  host.replaceChildren(
+    usersTable("Čakajú na schválenie", "Schváliť = dostane prístup do aplikácie.", pending, u => [
+      { label: "Schváliť", cls: "primary", run: () => Cloud.setStatus(u.uid, "active") },
+      { label: "Zamietnuť", cls: "danger", run: () => Cloud.setStatus(u.uid, "blocked") },
+    ]),
+    usersTable("Aktívni", "", active, (u, self) => [
+      { label: "Zablokovať", cls: "danger", disabled: self, run: () => Cloud.setStatus(u.uid, "blocked") },
+      { label: u.role === "admin" ? "Urobiť používateľom" : "Urobiť správcom", disabled: self,
+        run: () => Cloud.setRole(u.uid, u.role === "admin" ? "user" : "admin") },
+    ]),
+    usersTable("Zablokovaní / zamietnutí", "", blocked, u => [
+      { label: "Povoliť", run: () => Cloud.setStatus(u.uid, "active") },
+    ]),
+  );
+}
+
+// ---------------------------------------------------------------- naučené údaje
+async function mutateLearned(fn) {
+  try { await Cloud.updateLearned(fn); hideErr($("#lrMsg")); }
+  catch (e) { showErr($("#lrMsg"), "Nepodarilo sa uložiť: " + Cloud.errText(e)); }
+  await renderLearned();
+}
+
+function section(title, rows, hint) {
+  const box = document.createElement("div");
+  const h = document.createElement("h3"); h.textContent = `${title} (${rows.length})`; box.appendChild(h);
+  if (hint) { const p = document.createElement("div"); p.className = "hint"; p.textContent = hint; box.appendChild(p); }
+  if (!rows.length) { const p = document.createElement("div"); p.className = "empty"; p.textContent = "nič"; box.appendChild(p); return box; }
+  const ul = document.createElement("ul"); ul.className = "ent";
+  for (const r of rows) {
+    const li = document.createElement("li");
+    const sp = document.createElement("span"); sp.textContent = r.text; li.appendChild(sp);
+    const b = document.createElement("button"); b.className = "x"; b.textContent = "✕"; b.title = "Odstrániť";
+    b.onclick = () => mutateLearned(r.remove);
+    li.appendChild(b); ul.appendChild(li);
+  }
+  box.appendChild(ul);
+  return box;
+}
+
+async function renderLearned() {
+  const host = $("#learned");
+  let l;
+  try { l = await Cloud.loadLearned(); }
+  catch (e) { host.textContent = "Chyba: " + Cloud.errText(e); return; }
+  host.replaceChildren(
+    section("Zapamätaní dodávatelia", l.suppliers.map(s => ({ text: s, remove: x => { x.suppliers = x.suppliers.filter(v => v !== s); } })),
+      "Nájdu sa podľa názvu v texte faktúry."),
+    section("Opravy názvov", Object.entries(l.aliases).map(([k, v]) => ({ text: `${k}  →  ${v}`, remove: x => { delete x.aliases[k]; } })),
+      "Rozpoznaný názov → názov, ktorý zadal používateľ."),
+    section("Označenia čísla faktúry",
+      Object.entries(l.numberLabels).flatMap(([k, a]) => a.map(lab => ({
+        text: `${k}: „${lab}“`,
+        remove: x => { x.numberLabels[k] = x.numberLabels[k].filter(v => v !== lab); if (!x.numberLabels[k].length) delete x.numberLabels[k]; },
+      }))).concat(l.globalLabels.map(lab => ({ text: `pre všetkých dodávateľov: „${lab}“`, remove: x => { x.globalLabels = x.globalLabels.filter(v => v !== lab); } })))),
+    section("Tvary čísel faktúr",
+      Object.entries(l.numberShapes).flatMap(([k, a]) => a.map(sh => ({
+        text: `${k}: ${sh}`,
+        remove: x => { x.numberShapes[k] = x.numberShapes[k].filter(v => v !== sh); if (!x.numberShapes[k].length) delete x.numberShapes[k]; },
+      }))), "A = písmeno, 9 = číslica; slúžia na opravu OCR chýb."),
+  );
+}
+
+$("#lrClear").onclick = () => {
+  if (!confirm("Naozaj zmazať všetky naučené údaje pre všetkých používateľov?")) return;
+  mutateLearned(x => { Object.assign(x, emptyLearned()); });
+};
+
+// ---------------------------------------------------------------- štart
+(async function init() {
+  if (!Cloud.enabled) { $("#noCloud").hidden = false; return; }
+  me = await Cloud.requireLogin({ admin: true });
+  $("#content").hidden = false;
+  $("#who").textContent = me.user.email;
+  $("#logout").onclick = () => Cloud.logout();
+  await Promise.all([renderUsers(), renderLearned()]);
+})();
+</script>
+</body>
+</html>

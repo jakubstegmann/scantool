@@ -50,7 +50,13 @@
 </head>
 <body>
 <main>
-  <h1>Premenovanie naskenovaných faktúr</h1>
+  <div class="row">
+    <h1>Premenovanie naskenovaných faktúr</h1>
+    <span style="flex:1"></span>
+    <span class="hint" id="userEmail"></span>
+    <a id="adminLink" href="admin.html" hidden>Správa</a>
+    <button id="logoutBtn" hidden>Odhlásiť</button>
+  </div>
 
   <div id="unsupported">Tento prehliadač nepodporuje výber priečinkov. Otvorte stránku v <b>Google Chrome</b> alebo <b>Microsoft Edge</b>.</div>
 
@@ -126,7 +132,12 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="firebase-config.js"></script>
 <script src="parser.js"></script>
+<script src="cloud.js"></script>
 <script>
 "use strict";
 
@@ -144,8 +155,9 @@ const opts = {
   supplierFirst: store.get("supplierFirst", true),
 };
 
-// Naučené z opráv (pozri parser.js → learnFromCorrection); uložené v prehliadači.
-let learned = normalizeLearned(store.get("learned", null));
+// Naučené z opráv (pozri parser.js → learnFromCorrection).
+// So serverom (Firebase) sú spoločné pre všetkých používateľov; bez servera sa držia v prehliadači.
+let learned = Cloud.enabled ? emptyLearned() : normalizeLearned(store.get("learned", null));
 
 // Posledné priečinky (handle sa dá uložiť do IndexedDB)
 const idb = {
@@ -417,6 +429,9 @@ $("#analyze").onclick = async () => {
   files.sort((a, b) => a.name.localeCompare(b.name, "sk", { numeric: true }));
   if (!files.length) { showReport("Žiadne PDF", "Vo vstupnom priečinku sa nenašli žiadne súbory PDF."); return; }
 
+  if (Cloud.enabled) {   // získaj opravy, ktoré medzitým pridali ostatní
+    try { learned = await Cloud.loadLearned(); updateLearnedUi(); } catch (e) { console.warn("Načítanie naučených zlyhalo", e); }
+  }
   state.items = []; renderTable();
   state.cancel = false;
   setProgress(0, files.length);
@@ -493,14 +508,16 @@ $("#rename").onclick = async () => {
   } finally {
     setBusy(false);
   }
-  const lr = finishLearning();
+  const lr = await finishLearning();
   let text = `Úspešne skopírované: ${ok}\nZlyhalo: ${failures.length}\n\nVýstupný priečinok: ${state.outDir.name}`;
   if (failures.length) text += "\n\nChyby:\n" + failures.join("\n");
   if (ok) text += "\n\nPôvodné súbory zostali nedotknuté.";
   if (lr.total) {
     text += `\n\nNaučené z vašich opráv: ${lr.parts.join(", ")}.`;
+    if (Cloud.enabled && !lr.error) text += " Uložené na server pre všetkých používateľov.";
     if (lr.refreshed) text += `\nPodľa toho sa doplnilo/opravilo ${lr.refreshed} ďalších riadkov v tabuľke.`;
   }
+  if (lr.error) text += `\n\nPozor: naučené údaje sa nepodarilo uložiť na server (${lr.error}). Platia len do zatvorenia stránky.`;
   showReport("Súhrn premenovania", text);
 };
 
@@ -531,12 +548,23 @@ function applyLearnQueue(l) {
   return run;
 }
 
-/** Uloží naučené a znova vyhodnotí riadky, ktoré ešte neboli skopírované a ktoré používateľ ručne nemenil. */
-function finishLearning() {
+/** Uloží naučené (na server, alebo do prehliadača) a znova vyhodnotí riadky, ktoré ešte neboli skopírované a ktoré používateľ ručne nemenil. */
+async function finishLearning() {
   let run = { supplier: 0, alias: 0, label: 0, shape: 0 };
+  let error = null;
   if (learnQueue.length) {
-    run = applyLearnQueue(learned);
-    store.set("learned", learned);
+    if (Cloud.enabled) {
+      try {
+        const res = await Cloud.updateLearned(applyLearnQueue);   // spoločná sada, v transakcii
+        learned = res.learned; run = res.result;
+      } catch (e) {
+        error = Cloud.errText(e);
+        run = applyLearnQueue(learned);                            // aspoň pre túto reláciu
+      }
+    } else {
+      run = applyLearnQueue(learned);
+      store.set("learned", learned);
+    }
     learnQueue.length = 0;
   }
   const total = run.supplier + run.alias + run.label + run.shape;
@@ -563,7 +591,7 @@ function finishLearning() {
     updateButtons();
   }
   updateLearnedUi();
-  return { total, parts, refreshed };
+  return { total, parts, refreshed, error };
 }
 
 function updateLearnedUi() {
@@ -577,7 +605,7 @@ $("#learnedBtn").onclick = () => {
   const s = learnedStats(learned);
   const lines = [
     "Program sa učí z vašich opráv: keď v tabuľke niečo prepíšete a potvrdíte to tlačidlom „Premenovať“,",
-    "zapamätá si to a nabudúce to nájde sám. Údaje sú uložené len v tomto prehliadači.",
+    Cloud.enabled ? "zapamätá si to a nabudúce to nájde sám – pre všetkých používateľov (údaje sú uložené na serveri)." : "zapamätá si to a nabudúce to nájde sám. Údaje sú uložené len v tomto prehliadači.",
     "",
     `Zapamätaní dodávatelia (${s.suppliers}) – nájdu sa podľa názvu v texte faktúry:`,
     ...learned.suppliers.map(x => "  • " + x),
@@ -594,10 +622,15 @@ $("#learnedBtn").onclick = () => {
   ];
   showReport("Naučené z opráv", lines.join("\n"));
 };
-$("#learnedClear").onclick = () => {
-  if (!confirm("Naozaj zabudnúť všetko, čo sa program naučil z vašich opráv?")) return;
-  learned = emptyLearned();
-  store.set("learned", learned);
+$("#learnedClear").onclick = async () => {
+  if (!confirm("Naozaj zabudnúť všetko, čo sa program naučil z vašich opráv" + (Cloud.enabled ? " (pre všetkých používateľov)?" : "?"))) return;
+  if (Cloud.enabled) {
+    try { learned = (await Cloud.updateLearned(l => { Object.assign(l, emptyLearned()); })).learned; }
+    catch (e) { showReport("Chyba", "Nepodarilo sa zmazať: " + Cloud.errText(e)); return; }
+  } else {
+    learned = emptyLearned();
+    store.set("learned", learned);
+  }
   updateLearnedUi();
 };
 
@@ -617,6 +650,20 @@ function initOptions() {
   if (!window.showDirectoryPicker) $("#unsupported").style.display = "block";
   initOptions();
 
+  // Prihlásenie a spoločné naučené údaje zo servera (v lokálnom režime sa preskočí)
+  const session = await Cloud.requireLogin();
+  if (session) {
+    $("#userEmail").textContent = session.user.email;
+    $("#logoutBtn").hidden = false;
+    $("#logoutBtn").onclick = () => Cloud.logout();
+    $("#learnedClear").hidden = !session.isAdmin;   // mazať všetko môže len správca
+    if (session.isAdmin) {
+      $("#adminLink").hidden = false;
+      Cloud.countPending().then(n => { if (n) $("#adminLink").textContent = `Správa (čaká ${n})`; }).catch(() => {});
+    }
+    try { learned = await Cloud.loadLearned(); }
+    catch (e) { showReport("Chyba", "Naučené údaje sa nepodarilo načítať zo servera: " + Cloud.errText(e)); }
+  }
   try {
     const i = await idb.get("in"), o = await idb.get("out");
     if (i) { state.inDir = i; showFolder($("#inPath"), i, "  (naposledy zvolený)"); }

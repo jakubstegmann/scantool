@@ -1,0 +1,32 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function profilePath() { return /databases/$(database)/documents/users/$(request.auth.uid); }
+    // Má prihlásený používateľ schválený (aktívny) účet?
+    function isActive() { return signedIn() && exists(profilePath()) && get(profilePath()).data.status == 'active'; }
+    function isAdmin() { return isActive() && get(profilePath()).data.role == 'admin'; }
+
+    // Zoznam používateľov.
+    //  • Nový používateľ si môže vytvoriť LEN vlastný záznam, a to vždy ako "user" a "pending"
+    //    (čaká na schválenie) – seba schváliť ani povýšiť na správcu nemôže.
+    //  • Svoj záznam číta každý, všetky záznamy a ich zmeny (schválenie, blokovanie, role) len správca.
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.role == 'user'
+        && request.resource.data.status == 'pending';
+      allow update, delete: if isAdmin();
+    }
+
+    // Spoločné naučené údaje – číta a dopĺňa každý schválený používateľ.
+    match /learned/{id} {
+      allow read, write: if isActive();
+    }
+
+    match /{other=**} {
+      allow read, write: if false;
+    }
+  }
+}
